@@ -4,12 +4,13 @@ libagent/device/onlykey_pqc.py — composite post-quantum PGP for the OnlyKey ba
 Bridges lib-agent's GPG sign/decrypt to the composite PQC keys loaded on the OnlyKey
 (trustcrypto/libraries PR #31). One RSA slot (1-4) holds the composite key; the device
 does each half on-device, the host does the OpenPGP composite framing (concat sig /
-KMAC combine + AES key-unwrap), exactly like the openpgp.js `pqc` branch.
+SHA3-256 key combine + AES key-unwrap), exactly like the openpgp.js `pqc` branch.
 
 Composite algorithms (draft-ietf-openpgp-pqc):
-  * pqc_mldsa_ed25519 (algo 107): sign = Ed25519 sig (64) || ML-DSA-65 sig (3309)
-  * pqc_mlkem_x25519  (algo 105): decrypt = X25519 + ML-KEM-768, combined with
-    KMAC256("OpenPGPCompositeKDFv1"), then RFC 3394 AES-256 key-unwrap.
+  * pqc_mldsa_ed25519 (algo 30): sign = Ed25519 sig (64) || ML-DSA-65 sig (3309)
+  * pqc_mlkem_x25519  (algo 35): decrypt = X25519 + ML-KEM-768, combined with
+    SHA3-256 over the two key shares plus "OpenPGPCompositeKDFv1" and its
+    length (draft-ietf-openpgp-pqc-10), then RFC 3394 AES-256 key-unwrap.
 
 Wire protocol (okpqc.cpp on the device):
   * OKSIGN,    slot, payload = [selector] + digest      (selector 0=Ed25519, 1=ML-DSA)
@@ -17,7 +18,9 @@ Wire protocol (okpqc.cpp on the device):
   * OKDECRYPT, slot, payload = 1088-B ML-KEM ct   -> 32-B shared secret (PQC half)
 
 UNTESTED against hardware — by inspection; mirror-verified against openpgp.js kem.js.
-Requires GnuPG with composite-PQC (algo 105/107) support to be usable end-to-end.
+No shipping GnuPG can consume these keys: GnuPG is on the LibrePGP track (v5 keys,
+its own Kyber codepoint 8, no ML-DSA at all) and cannot parse a v6 key packet.
+rpgp >= 0.20 with the `draft-pqc` feature is the interoperable implementation.
 """
 import hashlib
 import struct
@@ -33,7 +36,11 @@ SS_LEN        = 32
 ED25519_SIG_LEN = 64
 MLDSA_SIG_LEN   = 3309
 
-MLKEM_ALGO_ID = 105  # pqc_mlkem_x25519
+# IANA-assigned (draft-ietf-openpgp-pqc-10). This is NOT just a tag: it is an
+# input to the key combiner in composite_decrypt() below, so it is bound into
+# the derived KEK. It was 105 - a PRIVATE/experimental codepoint - and every key
+# or message produced under that value is unreadable here and everywhere else.
+MLKEM_ALGO_ID = 35   # pqc_mlkem_x25519
 COMPOSITE_KDF_LABEL = b"OpenPGPCompositeKDFv1"
 
 
@@ -96,8 +103,15 @@ def _sha3_256(*parts):
 
 def kmac256(key, data, out_len, custom=b""):
     """KMAC256(key, data, out_len, custom) per NIST SP 800-185.
-    Backed by pycryptodome (Crypto.Hash.KMAC256); it's the customization string S that
-    carries the "OpenPGPCompositeKDFv1" domain separation (== noble's `personalization`)."""
+
+    NO LONGER USED by the key combiner. Kept because it is the only KMAC256
+    binding in this tree and deleting it would make the diff that removed it
+    look like the KDF change rather than a tidy-up; the combiner moved to plain
+    SHA3-256 in draft-ietf-openpgp-pqc-10. Remove it whenever, separately.
+
+    Backed by pycryptodome (Crypto.Hash.KMAC256); the customization string S is
+    what carried the "OpenPGPCompositeKDFv1" domain separation.
+    """
     from Crypto.Hash import KMAC256  # pip install pycryptodome
     return KMAC256.new(key=bytes(key), data=bytes(data), mac_len=out_len,
                        custom=bytes(custom)).digest()
@@ -121,14 +135,30 @@ def composite_decrypt(ok, slot, ecc_ct, mlkem_ct, ecc_pub, mlkem_pub, wrapped_ke
     ecc_ss   = device_decap_half(ok, slot, ecc_ct)      # X25519(k, ephemeral)
     mlkem_ss = device_decap_half(ok, slot, mlkem_ct)    # ML-KEM decapsulate
 
-    # 2) ECC key share = SHA3-256(ecc_ss || ecc_ct || ecc_pub)
-    ecc_key_share = _sha3_256(ecc_ss, ecc_ct, ecc_pub)
+    # 2) ECC key share IS the raw X25519 shared secret (draft-10, "X25519 KEM").
+    #    An earlier draft revision hashed it with the ciphertext and the
+    #    recipient key; that extra SHA3-256 was one of two reasons this stack's
+    #    KEK differed from every conforming implementation's.
+    ecc_key_share = ecc_ss
     mlkem_key_share = mlkem_ss
 
-    # 3) multiKeyCombine: KMAC256(mlkemKeyShare||eccKeyShare, encData, "OpenPGPCompositeKDFv1")
-    key = mlkem_key_share + ecc_key_share
-    enc_data = mlkem_ct + ecc_ct + mlkem_pub + ecc_pub + bytes([algo_id])
-    kek = kmac256(key, enc_data, 32, custom=COMPOSITE_KDF_LABEL)
+    # 3) Key combiner (draft-10):
+    #      SHA3-256( mlkemKeyShare || ecdhKeyShare || ecdhCipherText ||
+    #                ecdhPublicKey || algId || domSep || len(domSep) )
+    #
+    #    Was KMAC256 keyed on the two shares, over an encData that also carried
+    #    mlkem_ct and mlkem_pub, with the label as the KMAC customization
+    #    string. Neither the ML-KEM ciphertext nor its public key is an input
+    #    any more.
+    kek = _sha3_256(
+        mlkem_key_share,
+        ecc_key_share,
+        ecc_ct,
+        ecc_pub,
+        bytes([algo_id]),
+        COMPOSITE_KDF_LABEL,
+        bytes([len(COMPOSITE_KDF_LABEL)]),
+    )
 
     # 4) AES-256 key unwrap -> session key
     return _aes_key_unwrap(kek, wrapped_key)
