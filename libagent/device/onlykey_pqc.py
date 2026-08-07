@@ -8,9 +8,10 @@ SHA3-256 key combine + AES key-unwrap), exactly like the openpgp.js `pqc` branch
 
 Composite algorithms (draft-ietf-openpgp-pqc):
   * pqc_mldsa_ed25519 (algo 30): sign = Ed25519 sig (64) || ML-DSA-65 sig (3309)
-  * pqc_mlkem_x25519  (algo 35): decrypt = X25519 + ML-KEM-768, combined with
-    SHA3-256 over the two key shares plus "OpenPGPCompositeKDFv1" and its
-    length (draft-ietf-openpgp-pqc-10), then RFC 3394 AES-256 key-unwrap.
+  * pqc_mlkem_x25519  (algo 35): decrypt = X25519 + ML-KEM-768, combined per
+    draft-ietf-openpgp-pqc-10 section 4.2.1 - SHA3-256 over mlkemKeyShare,
+    ecdhKeyShare, ecdhCipherText, ecdhPublicKey, algId, "OpenPGPCompositeKDFv1"
+    and its length - then RFC 3394 AES-256 key-unwrap.
 
 Wire protocol (okpqc.cpp on the device):
   * OKSIGN,    slot, payload = [selector] + digest      (selector 0=Ed25519, 1=ML-DSA)
@@ -18,9 +19,11 @@ Wire protocol (okpqc.cpp on the device):
   * OKDECRYPT, slot, payload = 1088-B ML-KEM ct   -> 32-B shared secret (PQC half)
 
 UNTESTED against hardware — by inspection; mirror-verified against openpgp.js kem.js.
-No shipping GnuPG can consume these keys: GnuPG is on the LibrePGP track (v5 keys,
-its own Kyber codepoint 8, no ML-DSA at all) and cannot parse a v6 key packet.
-rpgp >= 0.20 with the `draft-pqc` feature is the interoperable implementation.
+GnuPG cannot consume these keys. It is on the LibrePGP track: v5 keys, its own
+Kyber codepoint 8 (PUBKEY_ALGO_KYBER in common/openpgpdefs.h) and no ML-DSA at
+all, and it rejects a v6 key packet outright. Checked against 2.4.8 and 2.5.21;
+no released version supports RFC 9580 v6 keys. rpgp >= 0.20 with the `draft-pqc`
+feature is the interoperable implementation.
 """
 import hashlib
 import struct
@@ -119,19 +122,23 @@ def composite_decrypt(ok, slot, ecc_ct, mlkem_ct, ecc_pub, mlkem_pub, wrapped_ke
     ecc_ss   = device_decap_half(ok, slot, ecc_ct)      # X25519(k, ephemeral)
     mlkem_ss = device_decap_half(ok, slot, mlkem_ct)    # ML-KEM decapsulate
 
-    # 2) ECC key share IS the raw X25519 shared secret (draft-10, "X25519 KEM")
-    #    - NOT hashed with the ciphertext and recipient key first, as an earlier
-    #    revision of the draft specified.
+    # 2) ECC key share IS the raw X25519 shared secret - draft-10 section
+    #    4.1.1.1, x25519Kem.Decaps(): "Set the output ecdhKeyShare to X". It is
+    #    NOT hashed with the ciphertext and recipient key first, which is what
+    #    this tree used to do.
     ecc_key_share = ecc_ss
     mlkem_key_share = mlkem_ss
 
-    # 3) Key combiner (draft-10):
-    #      SHA3-256( mlkemKeyShare || ecdhKeyShare || ecdhCipherText ||
-    #                ecdhPublicKey || algId || domSep || len(domSep) )
+    # 3) Key combiner - draft-10 section 4.2.1, verbatim:
+    #      KEK = SHA3-256( mlkemKeyShare || ecdhKeyShare || ecdhCipherText ||
+    #                      ecdhPublicKey || algId || domSep || len(domSep) )
+    #    where domSep is "OpenPGPCompositeKDFv1" and len(domSep) is one octet,
+    #    decimal 21.
     #
     #    NOT KMAC256, and neither the ML-KEM ciphertext nor its public key is
-    #    an input - an earlier revision of the draft specified both, and a KEK
-    #    built that way fails AES key unwrap against a conforming peer.
+    #    an input. This tree previously used KMAC256 over data that included
+    #    both, and a KEK built that way fails AES key unwrap against a
+    #    conforming peer.
     kek = _sha3_256(
         mlkem_key_share,
         ecc_key_share,
