@@ -101,22 +101,6 @@ def _sha3_256(*parts):
     return h.digest()
 
 
-def kmac256(key, data, out_len, custom=b""):
-    """KMAC256(key, data, out_len, custom) per NIST SP 800-185.
-
-    NO LONGER USED by the key combiner. Kept because it is the only KMAC256
-    binding in this tree and deleting it would make the diff that removed it
-    look like the KDF change rather than a tidy-up; the combiner moved to plain
-    SHA3-256 in draft-ietf-openpgp-pqc-10. Remove it whenever, separately.
-
-    Backed by pycryptodome (Crypto.Hash.KMAC256); the customization string S is
-    what carried the "OpenPGPCompositeKDFv1" domain separation.
-    """
-    from Crypto.Hash import KMAC256  # pip install pycryptodome
-    return KMAC256.new(key=bytes(key), data=bytes(data), mac_len=out_len,
-                       custom=bytes(custom)).digest()
-
-
 def _aes_key_unwrap(kek, wrapped):
     """RFC 3394 AES key unwrap (AES-256)."""
     from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
@@ -135,10 +119,9 @@ def composite_decrypt(ok, slot, ecc_ct, mlkem_ct, ecc_pub, mlkem_pub, wrapped_ke
     ecc_ss   = device_decap_half(ok, slot, ecc_ct)      # X25519(k, ephemeral)
     mlkem_ss = device_decap_half(ok, slot, mlkem_ct)    # ML-KEM decapsulate
 
-    # 2) ECC key share IS the raw X25519 shared secret (draft-10, "X25519 KEM").
-    #    An earlier draft revision hashed it with the ciphertext and the
-    #    recipient key; that extra SHA3-256 was one of two reasons this stack's
-    #    KEK differed from every conforming implementation's.
+    # 2) ECC key share IS the raw X25519 shared secret (draft-10, "X25519 KEM")
+    #    - NOT hashed with the ciphertext and recipient key first, as an earlier
+    #    revision of the draft specified.
     ecc_key_share = ecc_ss
     mlkem_key_share = mlkem_ss
 
@@ -146,10 +129,9 @@ def composite_decrypt(ok, slot, ecc_ct, mlkem_ct, ecc_pub, mlkem_pub, wrapped_ke
     #      SHA3-256( mlkemKeyShare || ecdhKeyShare || ecdhCipherText ||
     #                ecdhPublicKey || algId || domSep || len(domSep) )
     #
-    #    Was KMAC256 keyed on the two shares, over an encData that also carried
-    #    mlkem_ct and mlkem_pub, with the label as the KMAC customization
-    #    string. Neither the ML-KEM ciphertext nor its public key is an input
-    #    any more.
+    #    NOT KMAC256, and neither the ML-KEM ciphertext nor its public key is
+    #    an input - an earlier revision of the draft specified both, and a KEK
+    #    built that way fails AES key unwrap against a conforming peer.
     kek = _sha3_256(
         mlkem_key_share,
         ecc_key_share,
