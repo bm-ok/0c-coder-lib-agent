@@ -182,6 +182,47 @@ class Handler:
             raise AgentError(b'ERR 100696144 No such device <SCD>')
         keyring.sendline(conn, b'D ' + reply)
 
+    def _derive_identity(self, user_id, keygrip, keygrip_bytes, pubkey_dict):
+        """
+        Derive the key for `user_id` and return its Identity, or None.
+
+        None means the derived key is not the one `keygrip` asked about,
+        i.e. this user ID was not the key derivation input.
+        """
+        if pubkey_dict['algo'] not in {1, 2, 3}:
+            curve_name = protocol.get_curve_name_by_oid(pubkey_dict['curve_oid'])
+            ecdh = pubkey_dict['algo'] == protocol.ECDH_ALGO_ID
+            identity = client.create_identity(
+                user_id=user_id, curve_name=curve_name, keygrip=keygrip)
+            verifying_key = self.client.pubkey(identity=identity, ecdh=ecdh)
+            pubkey = protocol.PublicKey(
+                curve_name=curve_name, created=pubkey_dict['created'],
+                verifying_key=verifying_key, ecdh=ecdh)
+            if pubkey.key_id() != pubkey_dict['key_id']:
+                return None
+            if pubkey.keygrip() != keygrip_bytes:
+                return None
+            return identity
+
+        if len(pubkey_dict['_to_hash']) < 350:
+            curve_name = 'rsa2048'
+        elif len(pubkey_dict['_to_hash']) < 700:
+            curve_name = 'rsa4096'
+        else:
+            log.error('unknown identity type')
+            return None
+
+        identity = client.create_identity(
+            user_id=user_id, curve_name=curve_name, keygrip=keygrip)
+        verifying_key = self.client.pubkey(identity=identity, ecdh=False)
+        # protocol.PublicKey cannot compute an RSA key ID (its data() lacks the
+        # MPI framing), so compare the modulus the device returned the same way
+        # decode.py computed the keygrip we were asked about.
+        modulus = util.bytes2num(verifying_key)
+        if protocol.keygrip_rsa(modulus, modulus.bit_length()) != keygrip_bytes:
+            return None
+        return identity
+
     @util.memoize_method  # global cache for key grips
     def get_identity(self, keygrip):
         """
@@ -192,39 +233,21 @@ class Handler:
         keygrip_bytes = binascii.unhexlify(keygrip)
         pubkey_dict, user_ids = decode.load_by_keygrip(
             pubkey_bytes=self.pubkey_bytes, keygrip=keygrip_bytes)
-        # We assume the first user ID is used to generate Agent-based GPG keys.
-        user_id = user_ids[0]['value'].decode('utf-8')
-        if pubkey_dict['algo'] not in {1, 2, 3}:
-            curve_name = protocol.get_curve_name_by_oid(pubkey_dict['curve_oid'])
-            ecdh = pubkey_dict['algo'] == protocol.ECDH_ALGO_ID
-            identity = client.create_identity(
-                user_id=user_id, curve_name=curve_name, keygrip=keygrip)
-            verifying_key = self.client.pubkey(identity=identity, ecdh=ecdh)
-            pubkey = protocol.PublicKey(
-                curve_name=curve_name, created=pubkey_dict['created'],
-                verifying_key=verifying_key, ecdh=ecdh)
-            assert pubkey.key_id() == pubkey_dict['key_id']
-            assert pubkey.keygrip() == keygrip_bytes
-        elif len(pubkey_dict['_to_hash']) < 350:
-            identity = client.create_identity(
-                user_id=user_id, curve_name='rsa2048', keygrip=keygrip)
-            verifying_key = self.client.pubkey(identity=identity, ecdh=False)
-            pubkey = protocol.PublicKey(
-                curve_name='rsa2048', created=pubkey_dict['created'],
-                verifying_key=verifying_key, ecdh=False)
-        elif len(pubkey_dict['_to_hash']) < 700:
-            identity = client.create_identity(
-                user_id=user_id, curve_name='rsa4096', keygrip=keygrip)
-            verifying_key = self.client.pubkey(identity=identity, ecdh=False)
-            pubkey = protocol.PublicKey(
-                curve_name='rsa4096', created=pubkey_dict['created'],
-                verifying_key=verifying_key, ecdh=False)
-        else:
-            identity = 'unknown identity type'
-            log.error(identity)
+        # The keygrip only selects the device slot - it is not part of the key
+        # derivation input, the user ID is. Any of the key's user IDs may be
+        # the one it was generated from, so try them in order and keep the
+        # first that re-derives the key we were asked about.
+        for user_id_packet in user_ids:
+            user_id = user_id_packet['value'].decode('utf-8')
+            identity = self._derive_identity(
+                user_id=user_id, keygrip=keygrip,
+                keygrip_bytes=keygrip_bytes, pubkey_dict=pubkey_dict)
+            if identity is not None:
+                log.info('IDENTITY(%s)', identity)
+                return identity
 
-        log.info('IDENTITY(%s)', identity)
-        return identity
+        raise KeyError('{} keygrip does not match any user ID'.format(
+            util.hexlify(keygrip_bytes)))
 
     def pksign(self, conn):
         """Sign a message digest using a private EC key."""

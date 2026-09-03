@@ -1,5 +1,6 @@
 import binascii
 import hashlib
+import types
 
 import ecdsa
 import pytest
@@ -34,18 +35,12 @@ def _derive(identity):
         hashfunc=hashlib.sha256).get_verifying_key()
 
 
-class FakeUI:
-    """Minimal stand-in for device.ui."""
-
-    options_getter = None
-
-
 class FakeDevice:
     """Device that derives keys in-process, without any hardware."""
 
     def __init__(self):
         """C-tor."""
-        self.ui = FakeUI()
+        self.ui = types.SimpleNamespace(options_getter=None)
         self.user_ids = []
 
     def __enter__(self):
@@ -55,7 +50,7 @@ class FakeDevice:
     def __exit__(self, *args):
         """Nothing to close."""
 
-    def pubkey(self, identity, ecdh=False):
+    def pubkey(self, identity, ecdh=False):  # pylint: disable=unused-argument
         """Return the public key derived for this identity."""
         self.user_ids.append(identity.identity_dict['host'])
         return _derive(identity)
