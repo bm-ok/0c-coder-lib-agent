@@ -238,7 +238,15 @@ class Handler:
         # the one it was generated from, so try them in order and keep the
         # first that re-derives the key we were asked about.
         for user_id_packet in user_ids:
-            user_id = user_id_packet['value'].decode('utf-8')
+            try:
+                user_id = user_id_packet['value'].decode('utf-8')
+            except UnicodeDecodeError:
+                # GnuPG does not enforce UTF-8 user IDs, and this one cannot be
+                # the derivation input of any key we can derive - but a later
+                # one still can, so skip it rather than give up on the key.
+                log.warning('skipping non-UTF-8 user ID: %r',
+                            user_id_packet['value'])
+                continue
             identity = self._derive_identity(
                 user_id=user_id, keygrip=keygrip,
                 keygrip_bytes=keygrip_bytes, pubkey_dict=pubkey_dict)

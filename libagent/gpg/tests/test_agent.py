@@ -23,6 +23,10 @@ CREATED = 1500000000  # arbitrary, fixed so that key IDs are reproducible
 USER_ID_FIRST = 'First User <first@example.com>'
 USER_ID_SECOND = 'Second User <second@example.com>'
 USER_ID_OTHER = 'Nobody <nobody@example.com>'
+USER_ID_THIRD = 'Third User <third@example.com>'
+# OpenPGP user IDs are supposed to be UTF-8, but GnuPG does not enforce it and
+# Latin-1 user IDs exist in the wild.
+USER_ID_LATIN1 = b'Jos\xe9 <jose@example.com>'
 
 
 def _derive(identity):
@@ -56,6 +60,11 @@ class FakeDevice:
         return _derive(identity)
 
 
+def _encode_user_id(user_id):
+    """Serialize a user ID, which may be given as raw (non-UTF-8) bytes."""
+    return user_id if isinstance(user_id, bytes) else user_id.encode('utf-8')
+
+
 def _public_key_blob(derived_from, user_ids):
     """Serialize a public key packet, followed by several user ID packets."""
     identity = client.create_identity(user_id=derived_from,
@@ -65,7 +74,7 @@ def _public_key_blob(derived_from, user_ids):
                                 verifying_key=_derive(identity))
     blob = protocol.packet(tag=6, blob=pubkey.data())
     for user_id in user_ids:
-        blob += protocol.packet(tag=13, blob=user_id.encode('utf-8'))
+        blob += protocol.packet(tag=13, blob=_encode_user_id(user_id))
     return binascii.hexlify(pubkey.keygrip()).upper(), blob
 
 
@@ -94,3 +103,17 @@ def test_get_identity_without_matching_user_id(monkeypatch):
     handler = _handler(monkeypatch, pubkey_bytes)
     with pytest.raises(KeyError):
         handler.get_identity(keygrip=keygrip)
+
+
+def test_get_identity_skips_non_utf8_user_id(monkeypatch):
+    # A user ID that cannot be decoded is not a candidate, but it must not end
+    # the search either - the user ID that does derive the key comes after it.
+    keygrip, pubkey_bytes = _public_key_blob(
+        derived_from=USER_ID_THIRD,
+        user_ids=[USER_ID_LATIN1, USER_ID_THIRD])
+    handler = _handler(monkeypatch, pubkey_bytes)
+    identity = handler.get_identity(keygrip=keygrip)
+    assert identity.identity_dict['host'] == USER_ID_THIRD
+    # Skipped before the device was asked, rather than derived from a mangled
+    # string that could never have matched anyway.
+    assert handler.client.device.user_ids == [USER_ID_THIRD]
