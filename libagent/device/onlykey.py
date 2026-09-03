@@ -37,21 +37,52 @@ class OnlyKey(interface.Device):
         return onlykey_defs
 
     def connect(self):
-        """Enumerate and connect to the first USB HID interface."""
+        """Enumerate and connect to the first USB HID interface.
+
+        The HID handle is opened exactly once and always closed again on any
+        failure. The previous version constructed a fresh OnlyKey() - each of
+        which opens a USB HID handle - on every iteration of a retry loop and
+        never closed the earlier ones when the version string came back short,
+        so a client that hit that path (a running onlykey-gpg-agent in
+        particular) leaked open handles that the OS kept claimed, blocking
+        every other process - onlykey-cli, the OnlyKey App - from enumerating
+        the key until the agent was killed.
+        """
+        self.device_name = 'OnlyKey'
+        self.ok = None
         t_end = time.time() + 2.5
         while time.time() < t_end:
             try:
-                self.device_name = 'OnlyKey'
                 self.ok = self._defs.OnlyKey()
                 self.ok.set_time(time.time())
                 self.okversion = self.ok.read_string(timeout_ms=100)
                 if len(self.okversion) > 8:
                     self.okversion = self.okversion[8:]
-                    if self.okversion[0] == 'v':
-                        break
+                    if self.okversion and self.okversion[0] == 'v':
+                        return
+                # Not the reply we wanted (device still booting / another
+                # client mid-exchange): drop this handle before retrying so we
+                # never hold more than one open at a time.
+                self._safe_close()
+                time.sleep(0.1)
             except Exception as exc:
+                self._safe_close()
                 raise interface.NotFoundError(
                     '{} not connected: "{}"'.format(self.device_name, exc)) from exc
+        # Timed out without a good version - do not leave a handle open for the
+        # caller to inherit; it thinks connect() succeeded otherwise.
+        self._safe_close()
+        raise interface.NotFoundError(
+            '{} not connected: no version response'.format(self.device_name))
+
+    def _safe_close(self):
+        """Close and drop self.ok if it is open, swallowing any error."""
+        if getattr(self, 'ok', None) is not None:
+            try:
+                self.ok.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            self.ok = None
 
     def set_skey(self, skey):
         """Set signing key to use."""
@@ -157,7 +188,7 @@ class OnlyKey(interface.Device):
     def close(self):
         """Close connection."""
         log.info('disconnected from %s', self.device_name)
-        self.ok.close()
+        self._safe_close()
 
     def pubkey(self, identity, ecdh=False):
         """Return public key."""
