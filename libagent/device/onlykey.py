@@ -154,7 +154,26 @@ class OnlyKey(interface.Device):
                 raise KeyError('keygrip %s not found' % keygriplong)
         return None
 
-    DEFAULT_SLOT = 132
+    DEFAULT_SLOT = 132          # derived v1 (released SHA256 KDF), a.k.a. ECC32
+    DERIVED_V2_SLOT = 232       # derived v2 (HKDF): --skey/--dkey derived-v2 or ECC32v2
+
+    @classmethod
+    def _derived_version(cls, slot):
+        """1 for the released derived key (132), 2 for the HKDF one (232), else 0."""
+        if slot == cls.DEFAULT_SLOT:
+            return 1
+        if slot == cls.DERIVED_V2_SLOT:
+            return 2
+        return 0
+
+    def _derived_code(self, slot, curve_name, op):
+        """Sign/decrypt code for a derived identity from the shared protocol table."""
+        ver = 'v%d' % self._derived_version(slot)
+        table = self._defs.AGENT_DERIVATION[ver][op]
+        kt = self._defs.KeyType
+        curve = {'ed25519': kt.ED25519, 'nist256p1': kt.P256R1,
+                 'curve25519': kt.CURVE25519}.get(curve_name, kt.P256K1)
+        return table[curve]
 
     _SKEY_SLOT_RE = re.compile(r'--skey-slot=(\S+)')
     _DKEY_SLOT_RE = re.compile(r'--dkey-slot=(\S+)')
@@ -168,6 +187,8 @@ class OnlyKey(interface.Device):
         if not value:
             return None
         try:
+            if value.lower() in ('derived-v2', 'ecc32v2'):
+                return 232
             if value.startswith('ECC'):
                 return int(value[3:]) + 100
             if value.startswith('RSA'):
@@ -238,7 +259,10 @@ class OnlyKey(interface.Device):
             this_slot_id = self.skeyslot
             log.info('Key Slot =%s', this_slot_id)
         else:
-            this_slot_id = 132
+            # derived identity: 132 = v1 (SHA256 KDF), 232 = v2 (HKDF); same request shape
+            this_slot_id = self.dkeyslot if ecdh else self.skeyslot
+            if not self._derived_version(this_slot_id):
+                this_slot_id = self.DEFAULT_SLOT
 
         log.info('Requesting public key from key slot =%s', this_slot_id)
 
@@ -400,16 +424,9 @@ class OnlyKey(interface.Device):
                 raw_message = blob
             else:
                 raw_message = data
-        elif self.skeyslot == 132:
-            if curve_name == 'ed25519':
-                this_slot_id = 201
-                log.info('Key type ed25519')
-            elif curve_name == 'nist256p1':
-                this_slot_id = 202
-                log.info('Key type nistp256')
-            else:
-                this_slot_id = 203
-                log.info('Key type secp256k1')
+        elif self._derived_version(self.skeyslot):
+            this_slot_id = self._derived_code(self.skeyslot, curve_name, 'sign')
+            log.info('Derived v%d %s sign code %d', self._derived_version(self.skeyslot), curve_name, this_slot_id)
             # Send data and identity hash
             raw_message = blob + data
         elif curve_name != 'rsa':
@@ -507,16 +524,9 @@ class OnlyKey(interface.Device):
             keygrip = identity.identity_dict['keygrip']
             keygrip_slot_id = self.get_key_by_keygrip(keygrip)
 
-        if self.dkeyslot == 132:
-            if curve_name == 'curve25519':
-                this_slot_id = 204
-                log.info('Key type curve25519')
-            elif curve_name == 'nist256p1':
-                this_slot_id = 202
-                log.info('Key type nistp256')
-            else:
-                this_slot_id = 203
-                log.info('Key type secp256k1')
+        if self._derived_version(self.dkeyslot):
+            this_slot_id = self._derived_code(self.dkeyslot, curve_name, 'decrypt')
+            log.info('Derived v%d %s decrypt code %d', self._derived_version(self.dkeyslot), curve_name, this_slot_id)
             raw_message = pubkey + data
         else:
             if keygrip_slot_id is not None:
@@ -563,6 +573,8 @@ class OnlyKey(interface.Device):
 
 def convert_keyslot(self, s):  # pylint: disable=unused-argument
     """Return key slot number."""
+    if s.lower() in ('derived-v2', 'ecc32v2'):
+        return 232
     if 'ECC' in s:
         if len(s) == 5:
             return int(s[3:5]) + 100
