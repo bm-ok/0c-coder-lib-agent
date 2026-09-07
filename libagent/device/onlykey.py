@@ -59,6 +59,7 @@ class OnlyKey(interface.Device):
                 if len(self.okversion) > 8:
                     self.okversion = self.okversion[8:]
                     if self.okversion and self.okversion[0] == 'v':
+                        self._probe_capabilities()
                         return
                 # Not the reply we wanted (device still booting / another
                 # client mid-exchange): drop this handle before retrying so we
@@ -74,6 +75,33 @@ class OnlyKey(interface.Device):
         self._safe_close()
         raise interface.NotFoundError(
             '{} not connected: no version response'.format(self.device_name))
+
+    def _probe_capabilities(self):
+        """Ask the firmware what it supports; None on firmware without the report."""
+        self.caps = None
+        try:
+            self.caps = self.ok.getcapabilities()
+        except Exception as exc:  # best effort - old firmware, busy device
+            log.debug('capabilities probe failed: %s', exc)
+        if self.caps:
+            log.info('firmware %s flags=%s', self.caps.get('version'),
+                     [f.name for f in self.caps.get('flags', [])])
+
+    def _is_duo(self):
+        return bool(self.caps) and self._defs.CapabilityFlag.DUO in self.caps.get('flags', [])
+
+    def _challenge(self, raw_message, identity):
+        """Print the 3-digit code the device wants in challenge-code mode."""
+        b1, b2, b3 = self._defs.challenge_code(raw_message, duo=self._is_duo())
+        print('Confirm on OnlyKey to authorize ' + identity.to_string() +
+              ': press any button, or enter {} {} {} if derivedkeymode/storedkeymode is 0'
+              .format(b1, b2, b3))
+
+    def _raise_if_error(self, result):
+        """Raise DeviceError when a raw report is an Error/ERROR string from the device."""
+        kind, text = self._defs.classify_response(result)[:2]
+        if kind == 'error':
+            raise interface.DeviceError(text)
 
     def _safe_close(self):
         """Close and drop self.ok if it is open, swallowing any error."""
@@ -258,8 +286,7 @@ class OnlyKey(interface.Device):
                     raise interface.DeviceError(e)
 
             log.info('received= %s', repr(ok_pubkey))
-            if ok_pubkey[:5] == [69, 114, 114, 111, 114]:
-                raise interface.DeviceError("".join([chr(value) for value in ok_pubkey]))
+            self._raise_if_error(ok_pubkey)
             if len(set(ok_pubkey[34:63])) == 1:
                 if curve_name in ('nist256p1', 'secp256k1'):
                     raise interface.DeviceError("Public key curve does not match requested type")
@@ -394,14 +421,8 @@ class OnlyKey(interface.Device):
             # Send just hash
             raw_message = data
 
-        h2 = hashlib.sha256()
-        h2.update(raw_message)
-        d = h2.digest()
-        assert len(d) == 32
-        b1, b2, b3 = get_button(self, d[0]), get_button(self, d[15]), get_button(self, d[31])
         log.info('Key Slot =%s', this_slot_id)
-        print('Enter the 3 digit challenge code on OnlyKey to authorize '+identity.to_string())
-        print('{} {} {}'.format(b1, b2, b3))
+        self._challenge(raw_message, identity)
         t_end = time.time() + 22
         if 'rsa' not in curve_name:
             self.ok.send_large_message2(msg=self._defs.Message.OKSIGN, payload=raw_message,
@@ -414,6 +435,7 @@ class OnlyKey(interface.Device):
                 except Exception as e:
                     raise interface.DeviceError(e)
 
+            self._raise_if_error(result)
             if len(result) >= 60:
                 log.info('received= %s', repr(result))
                 while len(result) < 64:
@@ -434,6 +456,7 @@ class OnlyKey(interface.Device):
                 try:
                     sig_part = self.ok.read_bytes(timeout_ms=100)
                     if len(sig_part) == 64 and len(set(sig_part[0:63])) != 1:
+                        self._raise_if_error(sig_part)
                         log.info('received part= %s', repr(sig_part))
                         result += sig_part
                         if len(result) == siglen:
@@ -503,15 +526,9 @@ class OnlyKey(interface.Device):
             raw_message = pubkey
         log.info('Key Slot =%s', this_slot_id)
         log.info('data hash =%s', data)
-        h2 = hashlib.sha256()
-        h2.update(raw_message)
-        d = h2.digest()
-        assert len(d) == 32
-        b1, b2, b3 = get_button(self, d[0]), get_button(self, d[15]), get_button(self, d[31])
         self.ok.send_large_message2(msg=self._defs.Message.OKDECRYPT, payload=raw_message,
                                     slot_id=this_slot_id)
-        print('Enter the 3 digit challenge code on OnlyKey to authorize ' + identity.to_string())
-        print('{} {} {}'.format(b1, b2, b3))
+        self._challenge(raw_message, identity)
         t_end = time.time() + 22
         if 'rsa' not in curve_name:
             while time.time() < t_end:
@@ -521,6 +538,7 @@ class OnlyKey(interface.Device):
                         break
                 except Exception as e:
                     raise interface.DeviceError(e)
+            self._raise_if_error(result)
             if len(set(result[34:63])) == 1:
                 result = b'\x04' + bytes(result[0:32])
         else:
@@ -529,6 +547,7 @@ class OnlyKey(interface.Device):
                 try:
                     dec_part = self.ok.read_bytes(timeout_ms=100)
                     if len(dec_part) == 64 and len(set(dec_part[0:63])) != 1:
+                        self._raise_if_error(dec_part)
                         log.info('received part= %s', repr(dec_part))
                         result += dec_part
                         t_end = time.time() + 1
@@ -540,14 +559,6 @@ class OnlyKey(interface.Device):
         log.info('disconnected from %s', self.device_name)
         self.ok.close()
         return bytes(result)
-
-
-def get_button(self, byte):
-    """Return button number."""
-    if str(self.okversion) == 'v0.2-beta.8c':
-        return byte % 5 + 1
-    else:
-        return byte % 6 + 1
 
 
 def convert_keyslot(self, s):  # pylint: disable=unused-argument
