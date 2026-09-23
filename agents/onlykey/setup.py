@@ -26,9 +26,10 @@ setup(
     },
     scripts=['onlykey_agent.py'],
     install_requires=[
-        'lib-agent>=1.0.6',
-        'onlykey>=1.2.8'
+        'lib-agent>=1.0.8',
+        'onlykey>=1.3.0'
     ],
+    python_requires='>=3.10',
     platforms=['POSIX'],
     classifiers=[
         'Environment :: Console',
@@ -38,10 +39,10 @@ setup(
         'Intended Audience :: System Administrators',
         'License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)',
         'Operating System :: POSIX',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Topic :: System :: Networking',
         'Topic :: Communications',

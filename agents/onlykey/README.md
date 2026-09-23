@@ -45,13 +45,17 @@ Set up a GPG identity backed by your OnlyKey:
 onlykey-gpg init "Your Name <you@example.com>"
 ```
 
+Derived keys default to the original derivation, so existing SSH and GPG keys
+are unchanged. `--skey derived-v2` / `--dkey derived-v2` selects the newer
+HKDF-based derivation (firmware v3.0.5+), which gives different keys.
+
 Full SSH and GPG instructions, including common use cases, are available in the
 [project documentation](https://github.com/trustcrypto/onlykey-agent).
 
 ## Requirements
 
-- Python 3.8+
-- An [OnlyKey](https://onlykey.io) device
+- Python 3.10+
+- An [OnlyKey](https://onlykey.io) device (composite PQC GPG keys and `--skey/--dkey derived-v2` need firmware v3.0.5 or newer)
 - [`lib-agent`](https://pypi.org/project/lib-agent/) and the
   [`onlykey`](https://pypi.org/project/onlykey/) Python package (installed automatically)
 
