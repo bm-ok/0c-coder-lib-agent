@@ -21,7 +21,6 @@ import time
 import Crypto.Hash
 import Crypto.PublicKey
 import Crypto.Signature
-import daemon
 import semver
 from Crypto.Hash import SHA256, SHA512
 from Crypto.PublicKey import RSA
@@ -265,6 +264,11 @@ def run_agent(device_type):
     args, _ = p.parse_known_args()
 
     if args.daemon:
+        # Imported here, not at the top: python-daemon needs the Unix-only
+        # `pwd` module, so a top-level import stopped every lib-agent command
+        # from starting on Windows (onlykey-agent, onlykey-gpg init) although
+        # only --daemon uses it. Daemonizing stays Unix-only.
+        import daemon  # pylint: disable=import-outside-toplevel
         with daemon.DaemonContext():
             run_agent_internal(args, device_type)
     else:

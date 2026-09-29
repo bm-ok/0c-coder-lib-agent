@@ -12,7 +12,6 @@ import tempfile
 import threading
 
 import configargparse
-import daemon
 
 from .. import device, formats, server, util
 from . import client, protocol
@@ -301,6 +300,10 @@ def main(device_type):
         out = 'SSH_AUTH_SOCK={0}; export SSH_AUTH_SOCK;\n'.format(sock_path)
         sys.stdout.write(out)
         sys.stdout.flush()
+        # Imported here, not at the top: python-daemon needs the Unix-only
+        # `pwd` module, and a top-level import stopped onlykey-agent from
+        # starting on Windows at all. Only --daemonize uses it.
+        import daemon  # pylint: disable=import-outside-toplevel
         context = daemon.DaemonContext()
         log.info('running the agent as a daemon on %s', sock_path)
     elif args.foreground:
